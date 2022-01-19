@@ -57,7 +57,7 @@ class OptimizeBlackDots():
 
         Parameters
         ----------
-        mcs_data_all: `np.array`, (2, N_fiber, N_obs)
+        mcs_data_all: `np.array`, (2, N_fiber+1, N_obs)
            Positions of observed spots
         type_of_run: `str`
             Describing which kind of movement is being done
@@ -71,11 +71,11 @@ class OptimizeBlackDots():
 
         Returns
         ----------
-        prepared_observations_and_predictions `list`
-            lists contaning 4 arrays, which contains
-            observed positions in x and y,
-            and predicted position in x and y. Each array has a
-            length equal to the number of observations.
+        mcs_data_extended `np.array`, (3, N_fiber+1, N_obs)
+            Positions of observed and predicted spots.
+            Has an additional dimension to indicate if
+            the obervations was `good` (seen in the data, indicated with 1)
+            or not (not seen in the data, indicated with 0)
 
         Notes
         ----------
@@ -96,29 +96,27 @@ class OptimizeBlackDots():
         if there are breaks in the observed data.
 
         Depending on if you see points from both sides of the black dots,
-        and depending on the tpye of movement, it changes the
-        order of complexity for the extrapolation/interpolation
+        and depending on the type of movement, it changes the
+        order of complexity for the extrapolation/interpolation. Theta
+        moves are better behaved to more flexibility is fitting is possible.
+        It is also easier to interpolate than extrapolate, so we allow for
+        more freedom.
+
+        TODO
+        ----------
+        Capture warnings and avoid try statment
         """
         valid_run = {'theta', 'phi'}
         if type_of_run not in valid_run:
             raise ValueError("results: status must be one of %r." % valid_run)
 
-        # lists which will contain the positions which have been observed
-        # 2 runs and 2 coordinates = 4 lists
-        list_of_actual_position_x_observed = []
-        list_of_actual_position_y_observed = []
+        n_obs = mcs_data_all.shape[2]
+        mcs_data_extended = np.full((3, self.number_of_fibers+1, n_obs), np.nan)
 
-        # lists which will contain the position which were not observed
-        # and we predicted with this algorithm
-        list_of_predicted_position_x_not_observed = []
-        list_of_predicted_position_y_not_observed = []
-
-        for i in range(0, self.number_of_fibers):
-
+        for i in range(0, self.number_of_fibers+1):
             try:
                 x_measurments = mcs_data_all[0, i]
                 y_measurments = mcs_data_all[1, i]
-                n_obs = len(y_measurments)
 
                 # index of the points which are observed
                 isGood_init = np.isfinite(x_measurments) & np.isfinite(y_measurments)
@@ -140,16 +138,16 @@ class OptimizeBlackDots():
                 x_measurments[~isGood] = np.nan
                 y_measurments[~isGood] = np.nan
 
+                # specify the number of breaks in the data
                 if np.sum(np.diff(isGood)) == 1:
                     number_of_breaks = 1
                 else:
                     number_of_breaks = 2
 
-                # if np.sum(np.diff(idx)) == 1 we see points on only one side of the black dot
                 if type_of_run == 'theta':
                     poly_order = 3
                 if type_of_run == 'phi':
-                    poly_order_interpolation = 1
+                    poly_order = 1
                 # create prediction for where the points should be, when you do not see points
                 # if you do not see points from both sides of the black dots, do simpler extrapolation
                 # if you see points from both sides of the black dots, do more complex interpolation
@@ -201,33 +199,21 @@ class OptimizeBlackDots():
                 else:
                     predicted_position_x = np.full(n_obs, np.nan)
                     predicted_position_y = np.full(n_obs, np.nan)
-
-                # create lists which contain observed and predicted data
-                actual_position_x_observed = mcs_data_all[0, i][isGood]
-                actual_position_y_observed = mcs_data_all[1, i][isGood]
-
-                predicted_position_x_not_observed = predicted_position_x[~isGood]
-                predicted_position_y_not_observed = predicted_position_y[~isGood]
-
-                list_of_actual_position_x_observed.append(actual_position_x_observed)
-                list_of_actual_position_y_observed.append(actual_position_y_observed)
-
-                list_of_predicted_position_x_not_observed.append(predicted_position_x_not_observed)
-                list_of_predicted_position_y_not_observed.append(predicted_position_y_not_observed)
             except (TypeError, ValueError):
-                # if the process failed at some points, do not consider this fiber in the later stages
-                list_of_actual_position_x_observed.append([])
-                list_of_actual_position_y_observed.append([])
+                # if the process failed at some point, replace all values with nan
+                # and correspondign isGood with zeros.
 
-                list_of_predicted_position_x_not_observed.append(np.full(n_obs, np.nan))
-                list_of_predicted_position_y_not_observed.append(np.full(n_obs, np.nan))
+                predicted_position_x = (np.full(n_obs, np.nan))
+                predicted_position_y = (np.full(n_obs, np.nan))
+                isGood = np.zeros((n_obs), dtype=int)
 
-        prepared_observations_and_predictions = [list_of_actual_position_x_observed,
-                                                 list_of_actual_position_y_observed,
-                                                 list_of_predicted_position_x_not_observed,
-                                                 list_of_predicted_position_y_not_observed]
+            mcs_data_extended[0, i][isGood] = mcs_data_all[0, i][isGood]
+            mcs_data_extended[1, i][isGood] = mcs_data_all[1, i][isGood]
+            mcs_data_extended[0, i][~isGood] = predicted_position_x[~isGood]
+            mcs_data_extended[1, i][~isGood] = predicted_position_y[~isGood]
+            mcs_data_extended[2, i] = isGood
 
-        return prepared_observations_and_predictions
+        return mcs_data_extended
 
     @staticmethod
     def check(x, y, xc, yc, r):
@@ -258,13 +244,11 @@ class OptimizeBlackDots():
 
         return ((x - xc)**2 + (y - yc)**2) < r**2
 
-    def new_position_of_dot(self, i, xd_mod, yd_mod, scale, rot, x_scale_rot, y_scale_rot):
-        """Move the dot to the new position
+    def new_position_of_dots(self, xd_mod, yd_mod, scale, rot, x_scale_rot, y_scale_rot):
+        """Move the dots to the new positions
 
         Parameters
         ----------
-        i: `integer`
-            index of the cobra, starting from 1
         xd_mod: `float`
             x offset of the new position [mm]
         yd_mod: `float`
@@ -280,8 +264,9 @@ class OptimizeBlackDots():
 
         Returns
         ----------
-        xd_new, yd_new: `float`, `float`
-            x and y coordinate of the new position [mm]
+        dots_new: `pd.dataframe`
+            Dataframe contaning final guesses for dots
+            The columns are ['spotId', 'x', 'y', 'r']
 
         Notes
         ---------
@@ -289,11 +274,15 @@ class OptimizeBlackDots():
         and rotate/scale around custom origin
 
         Calls `rotate`
+
+        TODO
+        ---------
+        Paul recommends using lsst.geom.AffineTransform
         """
         dots = self.dots
 
-        xd_original = dots.loc[i-1]['x']
-        yd_original = dots.loc[i-1]['y']
+        xd_original = dots['x'].values
+        yd_original = dots['y'].values
 
         xd_offset = xd_original - x_scale_rot
         yd_offset = yd_original - y_scale_rot
@@ -308,84 +297,24 @@ class OptimizeBlackDots():
 
         xd_new = xc_rotated + xd_mod
         yd_new = yc_rotated + yd_mod
-        return xd_new, yd_new
 
-    def quality_measure_single_spot(self, obs_and_predict_multi_single_fiber,
-                                    xd, yd):
-        """Calculate a penalty given x and y dot positions
+        dots_new = dots.copy(deep=True)
+        dots_new['x'] = xd_new
+        dots_new['y'] = yd_new
 
-        Parameters
-        ----------
-        obs_and_predict_multi: `list`
-            list contaning observations for only one fiber
-        xd: `float`
-            x position of the dot [mm]
-        yd: `float`
-            y position of the dot [mm]
+        return dots_new
 
-        Returns
-        ----------
-        penalty_measure: `float`
-            total penalty for this position of the dot
-
-        Notes
-        ---------
-        Calculates `penalty`. Penalty consist of 2 factors:
-            1. Points should have been seen given the dot position,
-            but they are not seen
-            2. Point which are seen, but they should not have been
-            seen, given the dot position
-
-        Calls `check`
-        Gets called by `total_penalty_for_single_dot`
-        """
-        list_of_penalty_measure_single_run = []
-        for i in range(len(obs_and_predict_multi_single_fiber)):
-            prepared_observations_and_predictions =\
-                obs_and_predict_multi_single_fiber[i]
-
-            actual_position_x_observed,\
-                actual_position_y_observed,\
-                predicted_position_x_not_observed,\
-                predicted_position_y_not_observed = prepared_observations_and_predictions
-
-            # the ones which were seen - add penalty if you should not have seen them
-            penalty_measure_observed = []
-            for j in range(len(actual_position_x_observed)):
-                penalty_measure_observed.append(self.check(actual_position_x_observed[j],
-                                                           actual_position_y_observed[j],
-                                                           xd, yd, self.radius_of_black_dots))
-
-            # the ones which should not be seen - add penalty if you saw them
-            penalty_measure_predicted = []
-            for j in range(len(predicted_position_x_not_observed)):
-                # if you were not able to predict position, no penalty
-                if np.isnan(predicted_position_x_not_observed[j]):
-                    val = 0
-                else:
-                    val = self.check(predicted_position_x_not_observed[j],
-                                     predicted_position_y_not_observed[j],
-                                     xd, yd, self.radius_of_black_dots)
-                    val = 1 - val
-                penalty_measure_predicted.append(val)
-
-            penalty_measure_single_run = np.sum(penalty_measure_observed) + np.sum(penalty_measure_predicted)
-            list_of_penalty_measure_single_run.append(penalty_measure_single_run)
-
-        sum_penalty_measure_single_run = np.sum(list_of_penalty_measure_single_run)
-
-        return sum_penalty_measure_single_run
-
-    def total_penalty_for_single_dot(self, i, xd, yd):
+    def total_penalty_for_single_dot(self, x_obs, y_obs, status, xd, yd):
         """Calculate a penalty for a single dot
 
-        Wrapper function for `quality_measure_single_spot`, that
-        calculate penatly given index of the spot and the dot position
-
         Parameters
         ----------
-        i: `integer`
-            index of the cobra
+        x_obs: `np.array`
+            observations and predictions for x coordinate
+        y_obs: `np.array`
+            observations and predictions for y coordinate
+        status: `np.array`
+            status of observations
         xd: `float`
             x position of the dot [mm]
         yd: `float`
@@ -395,28 +324,22 @@ class OptimizeBlackDots():
         ----------
         total_penalty_for_single_modification: `float`
             total penalty for this position of the dot
+
+        Notes
+        ----------
+        All input data must be either predicted or observed sucesfully. If that
+        is not the case, i.e., if there are np.nan entres in the input
+        return zero penalty.
+        Otherwise, compare the results of coverage of input data with the moved
+        dot to the actuall success status of input observations. Any discrepancy
+        adds to the penalty.
         """
-        obs_and_predict_multi_single_fiber = []
-        for obs in range(self.n_of_obs):
-            obs_and_predict_multi_single_fiber_single_run = []
-            for j in range(4):
-                obs_and_predict_multi_single_fiber_single_run.append(
-                    self.obs_and_predict_multi[obs][j][i])
+        if np.sum(np.isnan(x_obs)) > 0:
+            total_penalty_for_single_modification = 0
+        else:
+            result_check = self.check(x_obs, y_obs, xd, yd, self.radius_of_black_dots)
+            total_penalty_for_single_modification = np.sum(np.array(result_check).astype(float) == status)
 
-            obs_and_predict_multi_single_fiber.append(
-                obs_and_predict_multi_single_fiber_single_run)
-
-        single_run_result_for_modification = []
-        try:
-            single_run_result_for_modification.\
-                append([i, self.quality_measure_single_spot(
-                    obs_and_predict_multi_single_fiber, xd, yd)])
-        except (TypeError, ValueError):
-            pass
-
-        single_run_result_for_modification = np.array(single_run_result_for_modification)
-
-        total_penalty_for_single_modification = np.sum(single_run_result_for_modification[:, 1])
         return total_penalty_for_single_modification
 
     def optimize_function(self, design_variables, return_full_result=False):
@@ -437,8 +360,9 @@ class OptimizeBlackDots():
         if return_full_result == False:
            single float with total penalty
         if return_full_result == True:
-           array with all dots, where each line contains [index,
-           penalty before optimization, penalty after optimization]
+           array with ashape (N_fiber, N_obs), where each line contains
+           penalty per observation
+
 
         Notes
         ----------
@@ -468,6 +392,7 @@ class OptimizeBlackDots():
                                       x0=init_simplex[0], method='Nelder-Mead',
                                       options={'maxiter':1000, 'initial_simplex':init_simplex})
         """
+
         xd_mod = design_variables[0]
         yd_mod = design_variables[1]
         scale = design_variables[2]
@@ -475,22 +400,27 @@ class OptimizeBlackDots():
         x_scale_rot = design_variables[4]
         y_scale_rot = design_variables[5]
 
-        list_of_test_dots = []
-        list_of_total_penalty_for_single_dot = []
-        for i in np.arange(0+1, self.number_of_fibers+1):
-            try:
-                new_position_for_single_dot = self.new_position_of_dot(i, xd_mod, yd_mod,
-                                                                       scale, rot, x_scale_rot, y_scale_rot)
-                list_of_total_penalty_for_single_dot.append(
-                    self.total_penalty_for_single_dot(i, new_position_for_single_dot[0],
-                                                      new_position_for_single_dot[1]))
-                list_of_test_dots.append(i)
-            except IndexError:
-                pass
+        optimization_result = np.zeros((self.number_of_fibers, self.n_of_obs))
+        dots_new = self.new_position_of_dots(xd_mod, yd_mod, scale,
+                                             rot, x_scale_rot, y_scale_rot)
+
+        for obs in range(self.n_of_obs):
+            for fib in range(1, self.number_of_fibers):
+                x_positions = self.obs_and_predict_multi[obs][0][fib]
+                y_positions = self.obs_and_predict_multi[obs][1][fib]
+                status = self.obs_and_predict_multi[obs][2][fib]
+                xd = dots_new['x'].iloc[fib-1]
+                yd = dots_new['y'].iloc[fib-1]
+                optimization_result[fib, obs] = self.total_penalty_for_single_dot(x_positions,
+                                                                                  y_positions,
+                                                                                  status,
+                                                                                  xd,
+                                                                                  yd)
+
         if return_full_result is False:
-            return np.sum(list_of_total_penalty_for_single_dot)
+            return np.sum(optimization_result)
         else:
-            return np.array(list_of_test_dots), list_of_total_penalty_for_single_dot
+            return np.sum(optimization_result), optimization_result
 
 
 def rotate(point, origin, angle):
